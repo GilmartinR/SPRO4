@@ -15,7 +15,7 @@ float ax, ay,az,aix,aiy,aiz;
 float gx,gy,gz,gix,giy,giz;
 float roll, pitch, heading;
 unsigned long microsPerReading, microsPrevious;
-float lastError=0, iError=0, prevFilteredError=0;
+float lastError=0, iError=0;
 float keel_angle;
 
 int servoPin = 12;
@@ -148,19 +148,14 @@ float convertRawGyro(float gRaw) {
 
 float PID(float input){
 
-
-
   float sampletime = microsPerReading/1e6;
 
   input = input * 3.14159/180;
   //declrate controller values
-  const float P = -0.4;
+  const float P = 0;
   const float I = 0;
   const float D = 0;
-  const float N = 100; //filter coefficient
   const float desired_angle = 0;
-  float filtereddError;
-  float alpha = (N*sampletime)/(1+N*sampletime);
 
   float Error, dError; //iError declared global due to having to be saved
   float output;
@@ -171,13 +166,11 @@ float PID(float input){
   iError += Error*sampletime;
   //calculate D
   dError = (Error-lastError)/sampletime;
-  filtereddError = alpha*dError+(1-alpha)*prevFilteredError;
   //combine  
-  output = P*Error + I*iError + D*filtereddError;
+  output = P*Error + I*iError + D*dError;
   //recalculate to angle
   output = output*180/3.14159;
   //save last error
-  prevFilteredError=filteredError;
   lastError = Error; //lastError declared global due to having to be saved
 
   return output;
@@ -193,4 +186,5 @@ void writeServo(int angle) {
 
   // Wait the rest of the 20 ms cycle
   delay(20 - pulseWidth / 1000);  // compensate for pulse time
+
 }
