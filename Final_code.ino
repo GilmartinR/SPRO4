@@ -1,14 +1,20 @@
 #include "GY521.h"
-#include <MadgwickAHRS.h>
 #include <Wire.h>
-
-Madgwick filter;
+#include <math.h>
 
 GY521 sensor(0x68);
 
 int XValue, XVALUE, servoVal;
 const int MPU_addr = 0x68; // I2C address of the MPU-6050
-int16_t AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ;
+double AcX, AcY, AcZ, Tmp, GyX, GyY, GyZ;
+double avAcX = 0, avAcY = 0, avAcZ = 0, avGyX =0, avGyY=0, avGyZ=0;
+
+double GyXBias = 4.5096, GyYBias = 0.32667, GyZBias = -0.96360;
+double AcXBias = 0.05383, AcYBias = -0.0198175, AcZBias = -0.066235;
+double AcXScale = 0.991449, AcYScale = 0.995614, AcZScale = 0.974915;
+
+float alpha = 0.95;
+double compRoll = 0, accRoll = 0, gyroRoll = 0;
 
 uint32_t counter = 0;
 float ax, ay,az,aix,aiy,aiz;
@@ -32,8 +38,6 @@ void setup()
   Wire.write(0x6B);       // PWR_MGMT_1 register
   Wire.write(0);          // Set to zero (wakes up the MPU-6050)
   Wire.endTransmission(true);
-  filter.begin(10);
-
   delay(100);
   while (sensor.wakeup() == false)
   {
@@ -47,14 +51,6 @@ void setup()
   sensor.setThrottle();
   Serial.println("start...");
 
-  //  set calibration values from calibration sketch.
-  sensor.axe = -0.2271997;
-  sensor.aye = 0.0152197;
-  sensor.aze = -0.9619946;
-  sensor.gxe = -4.5626717;
-  sensor.gye = -0.4598473;
-  sensor.gze = 1.1456488;
-
   pinMode(servoPin, OUTPUT);
   writeServo(90);
 
@@ -66,59 +62,53 @@ void setup()
 void loop()
 {
   unsigned long microsNow;
+  int consts = 0;
 
   microsNow = micros();
   if (microsNow - microsPrevious >= microsPerReading) {
 
     // convert from raw data to gravity and degrees/second units
     sensor.read();
-    /*aix = sensor.getAccelX();
-    aiy = sensor.getAccelY();
-    aiz = sensor.getAccelZ();
-    gix = sensor.getAngleX();
-    giy = sensor.getAngleY();
-    giz = sensor.getAngleZ();*/
 
-    ax = convertRawAcceleration(aix);
-    ay = convertRawAcceleration(aiy);
-    az = convertRawAcceleration(aiz);
-    gx = convertRawGyro(gix);
-    gy = convertRawGyro(giy);
-    gz = convertRawGyro(giz);
+    double dt = (microsNow - microsPrevious) / 1e6;
 
     Wire.beginTransmission(MPU_addr);
     Wire.write(0x3B); // Starting with register 0x3B (ACCEL_XOUT_H)
     Wire.endTransmission(false);
     Wire.requestFrom(MPU_addr, 14, true); // Request a total of 14 registers
 
-    AcX = Wire.read() << 8 | Wire.read();  // ACCEL_XOUT_H & ACCEL_XOUT_L
-    AcY = Wire.read() << 8 | Wire.read();  // ACCEL_YOUT_H & ACCEL_YOUT_L
-    AcZ = Wire.read() << 8 | Wire.read();  // ACCEL_ZOUT_H & ACCEL_ZOUT_L
-    Tmp = Wire.read() << 8 | Wire.read();  // TEMP_OUT_H & TEMP_OUT_L
-    GyX = Wire.read() << 8 | Wire.read();  // GYRO_XOUT_H & GYRO_XOUT_L
-    GyY = Wire.read() << 8 | Wire.read();  // GYRO_YOUT_H & GYRO_YOUT_L
-    GyZ = Wire.read() << 8 | Wire.read();  // GYRO_ZOUT_H & GYRO_ZOUT_L
+    AcX = (correctRawAccSign((Wire.read() << 8 | Wire.read())/16384.0)-AcXBias)*AcXScale;  // ACCEL_XOUT_H & ACCEL_XOUT_L
+    AcY = (correctRawAccSign((Wire.read() << 8 | Wire.read())/16384.0)-AcYBias)*AcYScale;  // ACCEL_YOUT_H & ACCEL_YOUT_L
+    AcZ = (correctRawAccSign((Wire.read() << 8 | Wire.read())/16384.0)-AcZBias)*AcZScale;  // ACCEL_ZOUT_H & ACCEL_ZOUT_L
+    Tmp = (Wire.read() << 8 | Wire.read());  // TEMP_OUT_H & TEMP_OUT_L
+    GyX = correctRawGyroSign((Wire.read() << 8 | Wire.read())/131.0) - GyXBias;  // GYRO_XOUT_H & GYRO_XOUT_L
+    GyY = correctRawGyroSign((Wire.read() << 8 | Wire.read())/131.0) - GyYBias;  // GYRO_YOUT_H & GYRO_YOUT_L
+    GyZ = correctRawGyroSign((Wire.read() << 8 | Wire.read())/131.0) - GyZBias;  // GYRO_ZOUT_H & GYRO_ZOUT_L
 
-    ax = convertRawAcceleration(AcX);
-    ay = convertRawAcceleration(AcY);
-    az = convertRawAcceleration(AcZ);
-    gx = convertRawGyro(GyX);
-    gy = convertRawGyro(GyY);
-    gz = convertRawGyro(GyZ);
+    //Complementary Filter implementation
 
-    // update the filter, which computes orientation
-    filter.updateIMU(gx, gy, gz, ax, ay, az);
+    accRoll = atan2(AcY, sqrt(AcX*AcX + AcZ*AcZ)) * 180.0 / PI;
+    compRoll = alpha *  (compRoll + GyX * dt) + (1.0 - alpha)*accRoll;
 
-    // print the heading, pitch and roll
-    roll = filter.getRoll();
+    //Solo Gyro
+    //gyroRoll = gyroRoll + GyX*dt;
 
-    keel_angle = PID(roll)+90; //+90 because the servo angle is 0-180 and PID calculates for -90 90
+    //Display Filter at work
+    /*Serial.print("Comp Roll ");
+    Serial.print(compRoll);
+    Serial.print(" \n");*/
+
+    /*Serial.print("Const0 ");
+    Serial.print(consts);
+    Serial.print(" \n");*/
+
+    keel_angle = PID(compRoll)+90; //+90 because the servo angle is 0-180 and PID calculates for -90 90
 
     Serial.print("Keel angle ");
     Serial.print(keel_angle);
     
     Serial.print(" Roll ");
-    Serial.println(roll);
+    Serial.println(compRoll);
 
     writeServo(keel_angle);
     // increment previous time, so we keep proper pace
@@ -126,24 +116,6 @@ void loop()
   }
   
   delay(3);
-}
-
-float convertRawAcceleration(float aRaw) {
-  // since we are using 4 g range
-  // -4 g maps to a raw value of -32768
-  // +4 g maps to a raw value of 32767
-  
-  float a = (aRaw * 2.0) / 32768.0;
-  return a;
-}
-
-float convertRawGyro(float gRaw) {
-  // since we are using 2000 degrees/seconds range
-  // -2000 maps to a raw value of -32768
-  // +2000 maps to a raw value of 32767
-  
-  float g = (gRaw * 250.0) / 32768.0;
-  return g;
 }
 
 float PID(float input){
@@ -187,4 +159,27 @@ void writeServo(int angle) {
   // Wait the rest of the 20 ms cycle
   delay(20 - pulseWidth / 1000);  // compensate for pulse time
 
+}
+
+
+double correctRawAccSign(double aRaw) {
+  double a;
+  if(aRaw > 2){
+      a = aRaw - 4;
+  }
+  else{
+      a = aRaw;
+  }
+  return a;
+}
+
+double correctRawGyroSign(double gRaw) {
+  double g;
+  if(gRaw > 250){
+      g = gRaw - 500;
+  }
+  else{
+      g = gRaw;
+  }
+  return g;
 }
